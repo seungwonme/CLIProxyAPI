@@ -166,6 +166,8 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	compat = e.resolveCompatConfig(auth, req)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(compat, baseModel, requestedModel) {
 		helps.NormalizeOpenAIToolResultsTextOnlyDoc(doc)
 	}
@@ -410,6 +412,8 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	compat = e.resolveCompatConfig(auth, req)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(compat, baseModel, requestedModel) {
 		helps.NormalizeOpenAIToolResultsTextOnlyDoc(doc)
 	}
