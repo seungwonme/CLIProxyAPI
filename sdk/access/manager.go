@@ -62,6 +62,7 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 		}
 		res, authErr := provider.Authenticate(ctx, r)
 		if authErr == nil {
+			ObserveAuthentication(ctx, r, res)
 			return res, nil
 		}
 		if IsAuthErrorCode(authErr, AuthErrorCodeNotHandled) {
@@ -85,4 +86,23 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 		return nil, NewNoCredentialsError()
 	}
 	return nil, NewNoCredentialsError()
+}
+
+type authenticationObserverKey struct{}
+
+// WithAuthenticationObserver installs a request-local callback after the first
+// successful provider. It cannot alter credential precedence or auth results.
+func WithAuthenticationObserver(ctx context.Context, observe func(*http.Request, *Result)) context.Context {
+	return context.WithValue(ctx, authenticationObserverKey{}, observe)
+}
+
+// ObserveAuthentication also supports native derived credentials whose issuer
+// has already been verified by the owning authentication implementation.
+func ObserveAuthentication(ctx context.Context, r *http.Request, result *Result) {
+	if ctx == nil || result == nil {
+		return
+	}
+	if observe, ok := ctx.Value(authenticationObserverKey{}).(func(*http.Request, *Result)); ok {
+		observe(r, result)
+	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -75,6 +76,7 @@ type codexWebsocketSession struct {
 	activeCh     chan codexWebsocketRead
 	activeDone   <-chan struct{}
 	activeCancel context.CancelFunc
+	transcript   *websocketTranscriptBinding
 	terminalConn *websocket.Conn
 	terminalErr  error
 
@@ -99,6 +101,98 @@ type codexWebsocketRead struct {
 	msgType int
 	payload []byte
 	err     error
+}
+
+type websocketTranscriptBinding struct {
+	sink logging.TranscriptSink
+	conn *websocket.Conn
+	ch   chan codexWebsocketRead
+}
+
+// The request owner holds reqMu until cleanup or stream handoff. Retain only
+// the optional sink, never the request context, on the reusable session.
+func (s *codexWebsocketSession) bindRequestTranscript(ctx context.Context) *websocketTranscriptBinding {
+	if s == nil {
+		return nil
+	}
+	var binding *websocketTranscriptBinding
+	if sink := logging.TranscriptFromContext(ctx); sink != nil {
+		binding = &websocketTranscriptBinding{sink: sink}
+	}
+	s.activeMu.Lock()
+	s.transcript = binding
+	s.activeMu.Unlock()
+	return binding
+}
+
+// A newly dialed connection already belongs to this request before its reader
+// starts. Reused connections remain unbound until their active read is installed.
+func (s *codexWebsocketSession) bindTranscriptConnection(conn *websocket.Conn) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.activeMu.Lock()
+	if s.transcript != nil && s.transcript.ch == nil {
+		s.transcript.conn = conn
+	}
+	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) bindActiveTranscript(binding *websocketTranscriptBinding, conn *websocket.Conn, ch chan codexWebsocketRead) {
+	if s == nil || binding == nil || conn == nil || ch == nil {
+		return
+	}
+	s.activeMu.Lock()
+	if s.transcript == binding && s.activeConn == conn && s.activeCh == ch {
+		binding.conn = conn
+		binding.ch = ch
+	}
+	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) clearRequestTranscript(binding *websocketTranscriptBinding) {
+	if s == nil || binding == nil {
+		return
+	}
+	s.activeMu.Lock()
+	if s.transcript == binding {
+		s.transcript = nil
+	}
+	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) transcriptBindingForConn(conn *websocket.Conn) *websocketTranscriptBinding {
+	if s == nil || conn == nil {
+		return nil
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	binding := s.transcript
+	if binding == nil || binding.conn != conn {
+		return nil
+	}
+	if binding.ch != nil && (s.activeConn != conn || s.activeCh != binding.ch) {
+		return nil
+	}
+	return binding
+}
+
+func (s *codexWebsocketSession) captureTranscriptRead(conn *websocket.Conn, owner *websocketTranscriptBinding, msgType int, payload []byte, err error) logging.TranscriptSink {
+	current := s.transcriptBindingForConn(conn)
+	if owner != nil && owner == current {
+		captureWebsocketUpstreamRead(owner.sink, msgType, payload, err)
+		return owner.sink
+	}
+	if owner != nil {
+		owner.sink.Drop(1, uint64(len(payload)))
+		if err != nil {
+			owner.sink.Failure("websocket.upstream.input", err)
+		}
+	} else if err == nil || len(payload) > 0 {
+		// An idle read must not be retroactively assigned to the next request.
+		log.Debugf("upstream websocket read without a stable request owner opcode=%d bytes=%d", msgType, len(payload))
+	}
+	return nil
 }
 
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
@@ -199,6 +293,9 @@ func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexW
 	defer s.activeMu.Unlock()
 	if s.activeConn != conn || s.activeCh != ch {
 		return false
+	}
+	if binding := s.transcript; binding != nil && conn != nil && ch != nil && binding.conn == conn && binding.ch == ch {
+		s.transcript = nil
 	}
 	s.activeConn = nil
 	s.activeCh = nil
@@ -719,6 +816,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 			sess.connMu.Lock()
 			sess.readerConn = conn
 			sess.connMu.Unlock()
+			sess.bindTranscriptConnection(conn)
 			sess.configureConn(conn)
 			go e.readUpstreamLoop(sess, conn)
 		}
@@ -755,6 +853,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
+	sess.bindTranscriptConnection(conn)
 	sess.configureConn(conn)
 	go e.readUpstreamLoop(sess, conn)
 	logCodexWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, false)
@@ -767,7 +866,9 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		owner := sess.transcriptBindingForConn(conn)
 		msgType, payload, errRead := conn.ReadMessage()
+		sink := sess.captureTranscriptRead(conn, owner, msgType, payload, errRead)
 		if errRead != nil {
 			sess.markTerminalError(conn, errRead)
 			invalidate := func() {
@@ -790,6 +891,9 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
+				if sink != nil {
+					sink.Failure("websocket.upstream.input.2", errBinary)
+				}
 				sess.markTerminalError(conn, errBinary)
 				invalidate := func() {
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)

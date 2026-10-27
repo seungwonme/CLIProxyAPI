@@ -36,7 +36,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.DELETE("/observability/logs", s.mgmt.DeleteLogs)
 	v8.GET("/observability/logs/errors", s.mgmt.GetRequestErrorLogs)
 	v8.GET("/observability/logs/errors/:name", s.mgmt.DownloadRequestErrorLog)
-	v8.GET("/observability/logs/requests/:id", s.mgmt.GetRequestLogByID)
+	v8.GET("/observability/logs/requests/:id", s.transcripts.Download(s.mgmt.GetRequestLogByID))
+	v8.GET("/observability/transcripts", s.transcripts.Stats)
 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 
