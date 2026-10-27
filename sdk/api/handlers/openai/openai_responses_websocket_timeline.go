@@ -239,6 +239,35 @@ func websocketPayloadPreview(payload []byte) string {
 	return previewText
 }
 
+// Operational logs are not partitioned transcripts. Suppression follows the
+// configured mode even when admission or store initialization leaves no sink.
+func (w *responsesWebsocketWriter) payloadDiagnostic(payload []byte) string {
+	if w == nil || (!w.transcriptEnabled && w.sink == nil) {
+		return fmt.Sprintf("event=%s payload=%s", websocketPayloadEventType(payload), websocketPayloadPreview(payload))
+	}
+	eventType := websocketPayloadEventType(payload)
+	switch eventType {
+	case "error", "response.failed", "response.completed", "response.done", "response.incomplete":
+	default:
+		eventType = "other"
+	}
+	status := gjson.GetBytes(payload, "status").Int()
+	if status < 100 || status > 599 {
+		status = 0
+	}
+	return fmt.Sprintf("event=%s status=%d bytes=%d", eventType, status, len(payload))
+}
+
+func (w *responsesWebsocketWriter) errorDiagnostic(err error) string {
+	if err == nil {
+		return ""
+	}
+	if w != nil && (w.transcriptEnabled || w.sink != nil) {
+		return requestlogging.SafeErrorDiagnostic(err)
+	}
+	return err.Error()
+}
+
 func isResponsesWebsocketCompletionEvent(eventType string) bool {
 	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
 }
