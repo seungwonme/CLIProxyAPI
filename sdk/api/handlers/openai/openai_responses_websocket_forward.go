@@ -110,11 +110,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
 		if wrote {
 			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				"responses websocket: downstream_out id=%s type=%d %s",
 				sessionID,
 				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+				writer.payloadDiagnostic(errorPayload),
 			)
 		}
 		cancel(errMsg.Error)
@@ -314,10 +313,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 					log.Warnf(
-						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+						"responses websocket: downstream_out write failed id=%s %s error=%s",
 						sessionID,
-						websocketPayloadEventType(payloads[i]),
-						errWrite,
+						writer.payloadDiagnostic(payloads[i]),
+						writer.errorDiagnostic(errWrite),
 					)
 					cancel(errWrite)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite

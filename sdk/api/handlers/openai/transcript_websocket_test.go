@@ -15,7 +15,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 type websocketTranscriptTestEvent struct {
@@ -267,6 +271,94 @@ func TestTranscriptWebsocketInputCapturesRawInterruptBeforeDiagnostics(t *testin
 			}
 			if diagnostic := events[1]; diagnostic.kind != "websocket.downstream.interrupt" || bytes.Contains(diagnostic.data, []byte("synthetic-id")) || bytes.Contains(diagnostic.data, []byte("keep-exact")) || bytes.Equal(diagnostic.data, payload) {
 				t.Fatalf("interrupt diagnostic must follow raw input and remain sanitized: %#v", diagnostic)
+			}
+		})
+	}
+}
+
+func TestTranscriptWebsocketOperationalDiagnosticsExcludeBodiesAndErrors(t *testing.T) {
+	payload := []byte(`{"type":"error","status":400,"error":{"message":"private-body-token"}}`)
+	for _, writer := range []*responsesWebsocketWriter{
+		{transcriptEnabled: true},
+		{sink: &websocketTranscriptTestSink{}},
+	} {
+		diagnostic := writer.payloadDiagnostic(payload)
+		if diagnostic != fmt.Sprintf("event=error status=400 bytes=%d", len(payload)) {
+			t.Fatalf("unexpected safe diagnostic: %q", diagnostic)
+		}
+		unknown := []byte(`{"type":"private-body-token","status":9999}`)
+		if got := writer.payloadDiagnostic(unknown); got != fmt.Sprintf("event=other status=0 bytes=%d", len(unknown)) {
+			t.Fatalf("untrusted event/status leaked: %q", got)
+		}
+		if got := writer.errorDiagnostic(&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "private-body-token"}); strings.Contains(got, "private-body-token") || got == "" {
+			t.Fatalf("close diagnostic leaks or loses classification: %q", got)
+		}
+	}
+	legacy := &responsesWebsocketWriter{}
+	if got := legacy.payloadDiagnostic(payload); got != "event=error payload="+string(payload) {
+		t.Fatalf("disabled native payload diagnostics changed: %q", got)
+	}
+	err := errors.New("legacy-diagnostic")
+	if got := legacy.errorDiagnostic(err); got != err.Error() {
+		t.Fatalf("disabled native error diagnostics changed: %q", got)
+	}
+}
+
+func TestTranscriptWebsocketForwardErrorsKeepRawBytesOutOfOperationalLog(t *testing.T) {
+	logger := log.StandardLogger()
+	previousOutput, previousLevel := logger.Out, logger.GetLevel()
+	var output bytes.Buffer
+	logger.SetOutput(&output)
+	logger.SetLevel(log.DebugLevel)
+	t.Cleanup(func() { logger.SetOutput(previousOutput); logger.SetLevel(previousLevel) })
+	for _, mode := range []string{"error-channel", "error-payload", "disconnect"} {
+		t.Run(mode, func(t *testing.T) {
+			output.Reset()
+			client, peer := newTranscriptWebsocketPeer(t)
+			sink := &websocketTranscriptTestSink{}
+			writer := newResponsesWebsocketWriter(peer)
+			writer.transcriptEnabled, writer.sink = true, sink
+			const sentinel = "synthetic-upstream-body-secret"
+			payload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"` + sentinel + `"}}`)
+			errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(string(payload))}
+			if mode == "disconnect" {
+				writer.closeForUpstreamDisconnect(errMsg.Error)
+			} else {
+				g, _ := gin.CreateTestContext(httptest.NewRecorder())
+				g.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+				var data chan []byte
+				var errs chan *interfaces.ErrorMessage
+				if mode == "error-channel" {
+					errs = make(chan *interfaces.ErrorMessage, 1)
+					errs <- errMsg
+				} else {
+					data = make(chan []byte, 1)
+					data <- payload
+				}
+				h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+				_, _, _, _, err := h.forwardResponsesWebsocket(g, writer, func(...interface{}) {}, data, errs, nil, "synthetic-session")
+				if err != nil && !errors.Is(err, websocket.ErrCloseSent) {
+					t.Fatal(err)
+				}
+			}
+			kind, received, err := client.ReadMessage()
+			if err != nil || kind != websocket.TextMessage || !bytes.Contains(received, []byte(sentinel)) {
+				t.Fatalf("wire error changed: %d %q %v", kind, received, err)
+			}
+			captured := false
+			for _, event := range sink.snapshot() {
+				if event.kind == "websocket.downstream.output.1" && bytes.Equal(event.data, received) {
+					captured = true
+				}
+			}
+			if !captured {
+				t.Fatal("exact delivered upstream error missing from transcript sink")
+			}
+			if strings.Contains(output.String(), sentinel) || bytes.Contains(output.Bytes(), received) || strings.Contains(output.String(), "payload=") {
+				t.Fatalf("raw operational log leak: %s", output.String())
+			}
+			if !strings.Contains(output.String(), "event=error") || !strings.Contains(output.String(), "bytes=") {
+				t.Fatalf("safe operational classification missing: %s", output.String())
 			}
 		})
 	}

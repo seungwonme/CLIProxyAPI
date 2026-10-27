@@ -123,10 +123,11 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 }
 
 type responsesWebsocketWriter struct {
-	conn    *websocket.Conn
-	sink    logging.TranscriptSink
-	writeMu sync.Mutex
-	closing atomic.Bool
+	conn              *websocket.Conn
+	sink              logging.TranscriptSink
+	transcriptEnabled bool
+	writeMu           sync.Mutex
+	closing           atomic.Bool
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
@@ -471,6 +472,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	codexResponseSteering := false
 	if h != nil {
 		if cfg := h.CurrentConfig(); cfg != nil {
+			writer.transcriptEnabled = cfg.Transcripts.Enabled
 			requestLogEnabled = cfg.RequestLog && !cfg.Transcripts.Enabled
 			codexResponseSteering = cfg.CodexResponseSteering
 		}
@@ -685,18 +687,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errAuth)
 			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				"responses websocket: downstream_out id=%s type=%d %s",
 				passthroughSessionID,
 				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+				writer.payloadDiagnostic(errorPayload),
 			)
 			if errWrite != nil {
 				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					"responses websocket: downstream_out write failed id=%s %s error=%s",
 					passthroughSessionID,
-					websocketPayloadEventType(errorPayload),
-					errWrite,
+					writer.payloadDiagnostic(errorPayload),
+					writer.errorDiagnostic(errWrite),
 				)
 				return
 			}
@@ -888,18 +889,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
 			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				"responses websocket: downstream_out id=%s type=%d %s",
 				passthroughSessionID,
 				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+				writer.payloadDiagnostic(errorPayload),
 			)
 			if errWrite != nil {
 				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					"responses websocket: downstream_out write failed id=%s %s error=%s",
 					passthroughSessionID,
-					websocketPayloadEventType(errorPayload),
-					errWrite,
+					writer.payloadDiagnostic(errorPayload),
+					writer.errorDiagnostic(errWrite),
 				)
 				return
 			}
