@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -92,11 +93,12 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
 	helps.FinalizePayloadDoc(ctx, doc)
 	finalPayload := doc.Bytes()
+	payloadLogEnabled := logging.TranscriptFromContext(ctx) != nil || (e.cfg != nil && e.cfg.RequestLog && !e.cfg.Transcripts.Enabled)
 	var (
 		bodyReader io.Reader = bytes.NewReader(finalPayload)
 		payloadLog []byte
 	)
-	if e.cfg != nil && e.cfg.RequestLog {
+	if payloadLogEnabled {
 		payloadLog = append([]byte(nil), finalPayload...)
 	}
 

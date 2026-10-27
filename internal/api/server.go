@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/transcript/adapter"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wstunnel"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -74,6 +75,7 @@ type Server struct {
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
+	transcripts   *adapter.Controller
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
@@ -196,6 +198,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	} else {
 		s.interceptorHost = optionState.pluginHost
 	}
+	s.transcripts, err = adapter.New(cfg.Transcripts)
+	if err != nil {
+		log.Warn("transcript capture unavailable; inference remains enabled")
+	}
+	engine.Use(s.transcripts.Middleware())
 
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
@@ -207,7 +214,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// captured before request logging finalizes.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
-	if !cfg.CommercialMode {
+	if !cfg.CommercialMode && !cfg.Transcripts.Enabled {
 		if optionState.requestLoggerFactory != nil {
 			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 		}
@@ -510,6 +517,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	if s.tunnelHub != nil {
 		s.tunnelHub.Close()
+	}
+	if s.transcripts != nil {
+		s.transcripts.Stop()
 	}
 	if errCloseServer != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)

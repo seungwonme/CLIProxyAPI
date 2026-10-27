@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
@@ -201,6 +202,13 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
+	if sink := logging.TranscriptFromContext(ctx); sink != nil {
+		if err != nil {
+			sink.HTTP("handler.error", "", "", err.StatusCode, err.Headers, err.Body)
+			sink.Failure("handler.error.detail", err.Error)
+		}
+		return
+	}
 	if h == nil || err == nil || ctx == nil {
 		return
 	}

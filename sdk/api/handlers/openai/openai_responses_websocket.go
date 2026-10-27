@@ -124,6 +124,7 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 
 type responsesWebsocketWriter struct {
 	conn    *websocket.Conn
+	sink    logging.TranscriptSink
 	writeMu sync.Mutex
 	closing atomic.Bool
 }
@@ -239,6 +240,19 @@ func queueResponsesWebsocketKeepAliveInterval(intervals chan time.Duration, inte
 	intervals <- interval
 }
 
+// writeTextPayload requires writeMu to be held by the caller.
+func (w *responsesWebsocketWriter) writeTextPayload(payload []byte) error {
+	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
+	if w.sink != nil {
+		if errWrite != nil {
+			w.sink.Failure("websocket.downstream.write.error", errWrite)
+		} else {
+			w.sink.Capture("websocket.downstream.output.1", payload)
+		}
+	}
+	return errWrite
+}
+
 func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -251,7 +265,7 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	}
 	defer w.writeMu.Unlock()
 
-	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
+	errWrite := w.writeTextPayload(payload)
 	errClose := w.conn.Close()
 	if errWrite != nil {
 		return false, errWrite
@@ -457,11 +471,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	codexResponseSteering := false
 	if h != nil {
 		if cfg := h.CurrentConfig(); cfg != nil {
-			requestLogEnabled = cfg.RequestLog
+			requestLogEnabled = cfg.RequestLog && !cfg.Transcripts.Enabled
 			codexResponseSteering = cfg.CodexResponseSteering
 		}
 	}
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	wsTimelineLog.sink = writer.sink
 	localInterrupt := newResponsesLocalInterrupt()
 	// Advanced on every upstream loss: input read under an older epoch predates the loss.
 	var inputEpoch atomic.Uint64
