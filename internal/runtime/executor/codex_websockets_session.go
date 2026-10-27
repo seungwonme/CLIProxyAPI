@@ -185,9 +185,6 @@ func (s *codexWebsocketSession) captureTranscriptRead(conn *websocket.Conn, owne
 	}
 	if owner != nil {
 		owner.sink.Drop(1, uint64(len(payload)))
-		if err != nil {
-			owner.sink.Failure("websocket.upstream.input", err)
-		}
 	} else if err == nil || len(payload) > 0 {
 		// An idle read must not be retroactively assigned to the next request.
 		log.Debugf("upstream websocket read without a stable request owner opcode=%d bytes=%d", msgType, len(payload))
