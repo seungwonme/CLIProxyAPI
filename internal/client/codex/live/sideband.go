@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -509,7 +510,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(ctx, downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -632,10 +633,15 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(ctx context.Context, downstream, upstream *websocket.Conn) error {
 	results := make(chan error, 2)
-	go func() { results <- copyWebsocket(upstream, downstream) }()
-	go func() { results <- copyWebsocket(downstream, upstream) }()
+	sink := logging.TranscriptFromContext(ctx)
+	go func() {
+		results <- copyWebsocket(upstream, downstream, sink, "websocket.downstream.request", "websocket.upstream.request")
+	}()
+	go func() {
+		results <- copyWebsocket(downstream, upstream, sink, "websocket.upstream.response", "websocket.downstream.response")
+	}()
 
 	firstErr := <-results
 	closeCode, closeReason := websocketCloseDetails(firstErr)
@@ -648,7 +654,7 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, sink logging.TranscriptSink, received, sent string) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -657,6 +663,11 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		writer, errWriter := destination.NextWriter(messageType)
 		if errWriter != nil {
 			return errWriter
+		}
+		if sink != nil {
+			kind := "." + strconv.Itoa(messageType)
+			reader = io.TeeReader(reader, transcriptRelayWriter{sink: sink, kind: received + kind})
+			writer = &transcriptRelayCloser{WriteCloser: writer, sink: sink, kind: sent + kind}
 		}
 		_, errCopy := io.Copy(writer, reader)
 		errClose := writer.Close()
@@ -667,6 +678,33 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 			return errClose
 		}
 	}
+}
+
+type transcriptRelayWriter struct {
+	sink logging.TranscriptSink
+	kind string
+}
+
+func (w transcriptRelayWriter) Write(p []byte) (int, error) {
+	w.sink.Capture(w.kind, p)
+	return len(p), nil
+}
+
+type transcriptRelayCloser struct {
+	io.WriteCloser
+	sink logging.TranscriptSink
+	kind string
+}
+
+func (w *transcriptRelayCloser) Write(p []byte) (int, error) {
+	n, err := w.WriteCloser.Write(p)
+	if n > 0 {
+		w.sink.Capture(w.kind, p[:n])
+	}
+	if err != nil {
+		w.sink.Failure(w.kind+".error", err)
+	}
+	return n, err
 }
 
 func websocketCloseDetails(err error) (int, string) {

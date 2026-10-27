@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -87,6 +88,13 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 		defer close(input)
 		for {
 			kind, payload, errRead := conn.ReadMessage()
+			if sink := logging.TranscriptFromContext(ctx); sink != nil {
+				if errRead == nil {
+					sink.Capture(fmt.Sprintf("websocket.downstream.input.%d", kind), payload)
+				} else {
+					sink.Failure("websocket.downstream.read.error", errRead)
+				}
+			}
 			if errRead != nil {
 				cancel(errRead)
 				return

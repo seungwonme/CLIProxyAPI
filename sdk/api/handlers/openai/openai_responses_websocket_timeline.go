@@ -29,6 +29,7 @@ type responsesWebsocketPinnedAuthState struct {
 type websocketTimelineLog struct {
 	mu      sync.Mutex
 	enabled bool
+	sink    requestlogging.TranscriptSink
 	source  *requestlogging.FileBodySource
 	builder *strings.Builder
 
@@ -72,7 +73,7 @@ func websocketTimelineSourceFromContext(c *gin.Context) *requestlogging.FileBody
 }
 
 func (l *websocketTimelineLog) BeginRequest() {
-	if l == nil || !l.enabled || l.source == nil {
+	if l == nil || l.sink != nil || !l.enabled || l.source == nil {
 		return
 	}
 	l.mu.Lock()
@@ -92,7 +93,14 @@ func (l *websocketTimelineLog) beginRequestLocked() {
 }
 
 func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestamp time.Time) {
-	if l == nil || !l.enabled {
+	if l == nil {
+		return
+	}
+	if l.sink != nil {
+		l.sink.Capture("websocket.downstream."+eventType, payload)
+		return
+	}
+	if !l.enabled {
 		return
 	}
 	l.mu.Lock()
@@ -121,7 +129,7 @@ func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestam
 }
 
 func (l *websocketTimelineLog) SetContext(c *gin.Context) {
-	if l == nil || !l.enabled {
+	if l == nil || l.sink != nil || !l.enabled {
 		return
 	}
 	l.mu.Lock()
@@ -142,7 +150,7 @@ func (l *websocketTimelineLog) SetContext(c *gin.Context) {
 }
 
 func (l *websocketTimelineLog) String() string {
-	if l == nil || !l.enabled {
+	if l == nil || l.sink != nil || !l.enabled {
 		return ""
 	}
 	l.mu.Lock()
@@ -231,6 +239,35 @@ func websocketPayloadPreview(payload []byte) string {
 	return previewText
 }
 
+// Operational logs are not partitioned transcripts. Suppression follows the
+// configured mode even when admission or store initialization leaves no sink.
+func (w *responsesWebsocketWriter) payloadDiagnostic(payload []byte) string {
+	if w == nil || (!w.transcriptEnabled && w.sink == nil) {
+		return fmt.Sprintf("event=%s payload=%s", websocketPayloadEventType(payload), websocketPayloadPreview(payload))
+	}
+	eventType := websocketPayloadEventType(payload)
+	switch eventType {
+	case "error", "response.failed", "response.completed", "response.done", "response.incomplete":
+	default:
+		eventType = "other"
+	}
+	status := gjson.GetBytes(payload, "status").Int()
+	if status < 100 || status > 599 {
+		status = 0
+	}
+	return fmt.Sprintf("event=%s status=%d bytes=%d", eventType, status, len(payload))
+}
+
+func (w *responsesWebsocketWriter) errorDiagnostic(err error) string {
+	if err == nil {
+		return ""
+	}
+	if w != nil && (w.transcriptEnabled || w.sink != nil) {
+		return requestlogging.SafeErrorDiagnostic(err)
+	}
+	return err.Error()
+}
+
 func isResponsesWebsocketCompletionEvent(eventType string) bool {
 	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
 }
@@ -303,11 +340,15 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
 	if writer.closing.Load() {
 		return websocket.ErrCloseSent
 	}
-	return writer.conn.WriteMessage(websocket.TextMessage, payload)
+	return writer.writeTextPayload(payload)
 }
 
 func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {
 	if err == nil {
+		return
+	}
+	if timelineLog, ok := timeline.(*websocketTimelineLog); ok && timelineLog != nil && timelineLog.sink != nil {
+		timelineLog.sink.Failure("websocket.downstream.disconnect", err)
 		return
 	}
 	if timeline != nil {

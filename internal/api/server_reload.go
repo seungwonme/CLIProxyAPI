@@ -63,6 +63,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	if len(oldConfigYaml) > 0 {
 		_ = yaml.Unmarshal(oldConfigYaml, &oldCfg)
 	}
+	// Transcript ownership and native logger selection are startup decisions.
+	// Keep the effective snapshot consistent until a deliberate restart.
+	if oldCfg != nil && !reflect.DeepEqual(oldCfg.Transcripts, cfg.Transcripts) {
+		log.Warn("transcript configuration changes require a restart")
+		cfg.Transcripts = oldCfg.Transcripts
+	}
 
 	// Update request logger enabled state if it has changed
 	previousRequestLog := false
