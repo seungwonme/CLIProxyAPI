@@ -133,8 +133,8 @@ func TestWebsocketTranscriptChangedOwnerDropsOnlyOldSinkAndIgnoresStaleCleanup(t
 		t.Fatalf("changed-owner read returned sink %T, want no attribution", got)
 	}
 	events, chunks, count := oldSink.snapshot()
-	if chunks != 1 || count != uint64(len(payload)) || len(events) != 1 || events[0].kind != "websocket.upstream.input" || events[0].err != readErr || len(events[0].data) != 0 {
-		t.Errorf("old sink observations=%#v dropped=(%d,%d), want only its loss and failure", events, chunks, count)
+	if chunks != 1 || count != uint64(len(payload)) || len(events) != 0 {
+		t.Errorf("old sink observations=%#v dropped=(%d,%d), want only its exact loss", events, chunks, count)
 	}
 	if events, chunks, count := newSink.snapshot(); len(events) != 0 || chunks != 0 || count != 0 {
 		t.Errorf("read begun by old owner was charged to new sink: events=%#v dropped=(%d,%d)", events, chunks, count)
