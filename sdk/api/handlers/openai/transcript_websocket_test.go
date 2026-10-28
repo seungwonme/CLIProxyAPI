@@ -311,7 +311,7 @@ func TestTranscriptWebsocketForwardErrorsKeepRawBytesOutOfOperationalLog(t *test
 	logger.SetOutput(&output)
 	logger.SetLevel(log.DebugLevel)
 	t.Cleanup(func() { logger.SetOutput(previousOutput); logger.SetLevel(previousLevel) })
-	for _, mode := range []string{"error-channel", "error-payload", "disconnect"} {
+	for _, mode := range []string{"error-channel", "error-payload", "disconnect", "closed-data", "closed-data-duplex"} {
 		t.Run(mode, func(t *testing.T) {
 			output.Reset()
 			client, peer := newTranscriptWebsocketPeer(t)
@@ -328,22 +328,41 @@ func TestTranscriptWebsocketForwardErrorsKeepRawBytesOutOfOperationalLog(t *test
 				g.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
 				var data chan []byte
 				var errs chan *interfaces.ErrorMessage
-				if mode == "error-channel" {
+				var opts responsesWebsocketForwardOptions
+				switch mode {
+				case "error-channel":
 					errs = make(chan *interfaces.ErrorMessage, 1)
 					errs <- errMsg
-				} else {
+				case "closed-data", "closed-data-duplex":
+					data = make(chan []byte)
+					errs = make(chan *interfaces.ErrorMessage, 1)
+					close(data)
+					opts.duplexStream = func() bool {
+						// Queue the error only after select takes the closed-data branch.
+						// This forces PendingStreamError to handle it without a select race.
+						errs <- errMsg
+						close(errs)
+						return mode == "closed-data-duplex"
+					}
+				default:
 					data = make(chan []byte, 1)
 					data <- payload
 				}
 				h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
-				_, _, _, _, err := h.forwardResponsesWebsocket(g, writer, func(...interface{}) {}, data, errs, nil, "synthetic-session")
+				_, _, _, terminalErr, err := h.forwardResponsesWebsocket(g, writer, func(...interface{}) {}, data, errs, nil, "synthetic-session", opts)
 				if err != nil && !errors.Is(err, websocket.ErrCloseSent) {
 					t.Fatal(err)
+				}
+				if mode != "error-payload" && terminalErr != errMsg {
+					t.Fatalf("terminal error = %p, want original upstream error %p", terminalErr, errMsg)
 				}
 			}
 			kind, received, err := client.ReadMessage()
 			if err != nil || kind != websocket.TextMessage || !bytes.Contains(received, []byte(sentinel)) {
 				t.Fatalf("wire error changed: %d %q %v", kind, received, err)
+			}
+			if mode != "disconnect" && !bytes.Equal(received, payload) {
+				t.Fatalf("wire error bytes = %q, want %q", received, payload)
 			}
 			captured := false
 			for _, event := range sink.snapshot() {
