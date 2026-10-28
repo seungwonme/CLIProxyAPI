@@ -2,7 +2,7 @@
 
 ## Scope and delivery status
 
-This is the personal fork's opt-in, best-effort local transcript contract, separate from application/debug logs and the upstream native request logger. It is not an audit system, a lossless capture promise, or an application-level encryption service. The reviewed source baseline is upstream `v8.0.40`, commit `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683`.
+This is the personal fork's opt-in, best-effort local transcript contract, separate from application/debug logs and the upstream native request logger. It is not an audit system, a lossless capture promise, or an application-level encryption service. The current upstream baseline is `v8.0.44`, commit `1f917e77c4562623aa49e9804d999524151a2f96`; the initial implementation used `v8.0.40`, commit `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683`.
 
 Source and configuration changes are not an operational rollout. The core's four production sources (`types.go`, `store.go`, `frames.go`, and `recovery.go`) implement the storage contract below. Release-specific commands, source/image digests, results, and known baseline failures belong in the feature PR and build provenance, not in this operating guide. No deployment or backup-policy change is implied by the presence of the code. Production enablement remains separately owned and approved.
 
@@ -45,7 +45,7 @@ Binding/root/store initialization failure is fail-open for inference: the server
 
 The stdlib-only core under `internal/transcript/core` owns one asynchronous store worker per server controller. The adapter owns native Gin/config/logging/access/transport integration, including the existing `sdk/httptransport.Decorator`; it does not introduce a replacement HTTP client or transport policy. Native lower-level packages depend on those seams, not on the core or adapter. Production composition imports the adapter only in `internal/api/server.go`.
 
-The following describes inspected implementation, not merely planned storage behavior. Final fault-injection and release acceptance remain incomplete:
+The following describes inspected implementation, not merely planned storage behavior. Release-specific fault-injection and acceptance results are recorded with the exact source/image provenance in the PR, rather than inferred from this guide:
 
 | Area | Implemented behavior and interpretation |
 | --- | --- |
@@ -80,7 +80,7 @@ The renderer marks known dropped-data gaps and invalid/incomplete frames. Check 
 
 Headers/query parameters with credential-sensitive names, URL userinfo/fragments, and sensitive redirect/referrer query values are masked before persistence. Arbitrary error strings are not persisted as diagnostics; `logging.SafeErrorDiagnostic` emits allowlisted failure signals/types. These measures do **not** make a transcript secret-free: request/response/error bodies, ordinary header values, URL paths, tool output, prompts, generated code, and WebSocket payloads can contain personal information and credentials. Unknown custom credential fields need a security review. Treat every transcript and download as sensitive raw data.
 
-When transcripts are enabled, Responses WebSocket operational diagnostics retain only an allowlisted event classification, numeric HTTP status and payload byte count. They do not duplicate response/error bodies into the unpartitioned application log. Transport and close errors use `SafeErrorDiagnostic`, including client-controlled close reasons. This suppression follows the configured feature mode even when a missing binding, failed store or admission limit leaves no capture sink. Raw protocol bytes still go unchanged to the client and to an admitted transcript; disabling transcripts retains the native diagnostic behavior.
+When transcripts are enabled, Responses WebSocket operational diagnostics retain only an allowlisted event classification, numeric HTTP status and payload byte count. They do not duplicate response/error bodies into the unpartitioned application log. Transport and close errors use `SafeErrorDiagnostic`, including client-controlled close reasons. This suppression follows the configured feature mode even when a missing binding, failed store or admission limit leaves no capture sink. Raw protocol bytes still go unchanged to the client and to an admitted transcript; disabling transcripts retains the native diagnostic behavior. The v8.0.44 merge preserves upstream's shared terminal-error handler and pending-error drain on closed data channels, including duplex/replay semantics, while retaining sanitized diagnostics in the moved handler.
 
 ## Inspected native hook inventory
 
