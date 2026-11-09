@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -60,6 +62,7 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	sessionKind := sessionObjectKind(sess)
 	payloadBytes := len(payload)
 	start := time.Now()
+	owner := sess.transcriptBindingForConn(conn)
 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
 	var errSend error
 	if sess != nil {
@@ -70,11 +73,33 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 		errSend = conn.WriteMessage(websocket.TextMessage, payload)
 	}
 	if errSend != nil {
+		if owner != nil {
+			owner.sink.Failure("websocket.upstream.output.1", errSend)
+		}
 		log.Warnf("%s websockets: write payload failed session=%s session_object=%s bytes=%d duration=%v err=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start), errSend)
 	} else {
+		if owner != nil {
+			if sess.transcriptBindingForConn(conn) == owner {
+				owner.sink.Capture("websocket.upstream.output.1", payload)
+			} else {
+				owner.sink.Drop(1, uint64(payloadBytes))
+			}
+		}
 		log.Debugf("%s websockets: write payload completed session=%s session_object=%s bytes=%d duration=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start))
 	}
 	return errSend
+}
+
+func captureWebsocketUpstreamRead(sink logging.TranscriptSink, msgType int, payload []byte, err error) {
+	if sink == nil {
+		return
+	}
+	if err == nil || len(payload) > 0 {
+		sink.Capture("websocket.upstream.input."+strconv.Itoa(msgType), payload)
+	}
+	if err != nil {
+		sink.Failure("websocket.upstream.input", err)
+	}
 }
 
 func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
@@ -154,6 +179,7 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
+		captureWebsocketUpstreamRead(logging.TranscriptFromContext(ctx), msgType, payload, errRead)
 		return msgType, payload, errRead
 	}
 	if conn == nil {

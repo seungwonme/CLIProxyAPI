@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -109,9 +110,11 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 }
 
 type responsesWebsocketWriter struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	closing atomic.Bool
+	conn              *websocket.Conn
+	sink              requestlogging.TranscriptSink
+	transcriptEnabled bool
+	writeMu           sync.Mutex
+	closing           atomic.Bool
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
@@ -179,12 +182,25 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	}
 	defer w.writeMu.Unlock()
 
-	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
+	errWrite := w.writeTextPayload(payload)
 	errClose := w.conn.Close()
 	if errWrite != nil {
 		return false, errWrite
 	}
 	return true, errClose
+}
+
+// writeTextPayload requires writeMu to be held by the caller.
+func (w *responsesWebsocketWriter) writeTextPayload(payload []byte) error {
+	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
+	if w.sink != nil {
+		if errWrite != nil {
+			w.sink.Failure("websocket.downstream.write.error", errWrite)
+		} else {
+			w.sink.Capture("websocket.downstream.output.1", payload)
+		}
+	}
+	return errWrite
 }
 
 func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
@@ -208,13 +224,12 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 	wrote, errClose := w.closeWithPayload(payload)
 	if wrote {
 		log.Infof(
-			"responses websocket: downstream_out disconnect_error event=%s payload=%s",
-			websocketPayloadEventType(payload),
-			websocketPayloadPreview(payload),
+			"responses websocket: downstream_out disconnect_error %s",
+			w.payloadDiagnostic(payload),
 		)
 	}
 	if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
-		log.Debugf("responses websocket: upstream disconnect close failed: %v", errClose)
+		log.Debugf("responses websocket: upstream disconnect close failed: %s", w.errorDiagnostic(errClose))
 	}
 }
 
@@ -348,11 +363,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	codexResponseSteering := false
 	if h != nil {
 		if cfg := h.CurrentConfig(); cfg != nil {
-			requestLogEnabled = cfg.RequestLog
+			writer.transcriptEnabled = cfg.Transcripts.Enabled
+			requestLogEnabled = cfg.RequestLog && !cfg.Transcripts.Enabled
 			codexResponseSteering = cfg.CodexResponseSteering
 		}
 	}
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	wsTimelineLog.sink = requestlogging.TranscriptFromContext(c.Request.Context())
+	writer.sink = wsTimelineLog.sink
 	localInterrupt := newResponsesLocalInterrupt()
 	input, inputDone := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
 		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
@@ -416,7 +434,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		cancelSocket(nil)
 		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
-			log.Warnf("responses websocket: close connection error: %v", errClose)
+			log.Warnf("responses websocket: close connection error: %s", writer.errorDiagnostic(errClose))
 		}
 		// Finish control-frame diagnostics before snapshotting the timeline.
 		<-inputDone
@@ -505,7 +523,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
+				log.Infof("responses websocket: client disconnected id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errReadMessage))
 			} else {
 				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
 			}
@@ -537,18 +555,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errAuth)
 			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				"responses websocket: downstream_out id=%s type=%d %s",
 				passthroughSessionID,
 				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+				writer.payloadDiagnostic(errorPayload),
 			)
 			if errWrite != nil {
 				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					"responses websocket: downstream_out write failed id=%s %s error=%s",
 					passthroughSessionID,
-					websocketPayloadEventType(errorPayload),
-					errWrite,
+					writer.payloadDiagnostic(errorPayload),
+					writer.errorDiagnostic(errWrite),
 				)
 				return
 			}
@@ -610,7 +627,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !matched {
 					_ = conn.Close()
 				} else if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
-					log.Debugf("responses websocket: replay close failed id=%s error=%v", passthroughSessionID, errClose)
+					log.Debugf("responses websocket: replay close failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errClose))
 				}
 				return
 			}
@@ -731,18 +748,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
 			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				"responses websocket: downstream_out id=%s type=%d %s",
 				passthroughSessionID,
 				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+				writer.payloadDiagnostic(errorPayload),
 			)
 			if errWrite != nil {
 				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					"responses websocket: downstream_out write failed id=%s %s error=%s",
 					passthroughSessionID,
-					websocketPayloadEventType(errorPayload),
-					errWrite,
+					writer.payloadDiagnostic(errorPayload),
+					writer.errorDiagnostic(errWrite),
 				)
 				return
 			}
@@ -876,9 +892,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			case isWebsocketConnectionClosedError(errForward):
 				// The client hung up while a downstream write was in flight. This is a
 				// normal shutdown race, not a proxy failure.
-				log.Debugf("responses websocket: client closed during forward id=%s error=%v", passthroughSessionID, errForward)
+				log.Debugf("responses websocket: client closed during forward id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errForward))
 			default:
-				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
+				log.Warnf("responses websocket: forward failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errForward))
 			}
 			return
 		}
@@ -893,7 +909,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !matched {
 					_ = conn.Close()
 				} else if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
-					log.Debugf("responses websocket: credential replay close failed id=%s error=%v", passthroughSessionID, errClose)
+					log.Debugf("responses websocket: credential replay close failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errClose))
 				}
 				return
 			}

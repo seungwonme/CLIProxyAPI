@@ -1156,6 +1156,20 @@ multimedia:
   # to the credential that created them. Default: 3h.
   video-result-auth-cache-ttl: "3h"
 
+# Optional isolated local transcripts, independent of native logging settings below.
+# Disabled unless explicitly enabled; raw bodies can contain secrets. See docs/transcripts.md.
+# Root and verified client-key bindings take effect only after a restart.
+# The fixed 10 GiB aggregate logical cap includes metadata and reservations; no age expiry.
+# Env names below are synthetic references to existing client keys, not key values.
+# transcripts:
+#   enabled: false
+#   root: "/transcripts" # Absolute path; mount separately and exclude from backups.
+#   users:
+#     - env_name: "EXAMPLE_TRANSCRIPT_CLIENT_A"
+#       user_id: "example-user-a"
+#     - env_name: "EXAMPLE_TRANSCRIPT_CLIENT_B"
+#       user_id: "example-user-b"
+
 # Application logs, request logs, usage aggregation, and profiling.
 observability:
   logs:

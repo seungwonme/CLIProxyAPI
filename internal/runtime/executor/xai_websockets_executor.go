@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -495,16 +496,19 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	isEphemeralSession := false
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
-		if sess != nil {
-			sess.reqMu.Lock()
-		}
 	} else {
 		isEphemeralSession = true
 		sess = newEphemeralCodexWebsocketSession()
 	}
-	streamSessionLocked := sess != nil && !isEphemeralSession
+	var requestTranscript *websocketTranscriptBinding
+	if sess != nil {
+		sess.reqMu.Lock()
+		requestTranscript = sess.bindRequestTranscript(ctx)
+	}
+	streamSessionLocked := sess != nil
 	unlockStreamSession := func() {
 		if sess != nil && streamSessionLocked {
+			sess.clearRequestTranscript(requestTranscript)
 			sess.reqMu.Unlock()
 			streamSessionLocked = false
 		}
@@ -585,6 +589,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	var readCh chan codexWebsocketRead
 	if sess != nil {
 		readCh = sess.activate(conn)
+		sess.bindActiveTranscript(requestTranscript, conn, readCh)
 	}
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -595,7 +600,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "send_error", errSend)
 				sess.clearActive(conn, readCh)
-				sess.reqMu.Unlock()
+				unlockStreamSession()
 				if !shouldRetryXAIWebsocketSend(errSend) {
 					return nil, errSend
 				}
@@ -604,16 +609,17 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
 			if !shouldRetryXAIWebsocketSend(errSend) {
 				sess.clearActive(conn, readCh)
-				sess.reqMu.Unlock()
+				unlockStreamSession()
 				return nil, errSend
 			}
+			requestTranscript = sess.bindRequestTranscript(ctx)
 			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
 				bodyErrRetry := websocketHandshakeBody(respHSRetry)
 				closeHTTPResponseBody(respHSRetry, "xai websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
 				sess.clearActive(conn, readCh)
-				sess.reqMu.Unlock()
+				unlockStreamSession()
 				if respHSRetry != nil && respHSRetry.StatusCode > 0 {
 					return nil, xaiStatusErr(respHSRetry.StatusCode, bodyErrRetry)
 				}
@@ -624,11 +630,12 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			closer = closerRetry
 			if errBind := sess.bindExecutionLifecycle(opts, conn, closer, req.Model); errBind != nil {
 				clearRetryActiveState(sess, previousConn, previousReadCh)
-				sess.reqMu.Unlock()
+				unlockStreamSession()
 				closeWebsocketAfterBindFailure(sess, conn, closer)
 				return nil, errBind
 			}
 			readCh = sess.activate(conn)
+			sess.bindActiveTranscript(requestTranscript, conn, readCh)
 			wsReqBodyRetry := buildXAIWebsocketRequestBody(prepared.body, prepared.finalizePayload)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
@@ -650,7 +657,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 				sess.clearActive(conn, readCh)
-				sess.reqMu.Unlock()
+				unlockStreamSession()
 				return nil, errSendRetry
 			}
 			wsReqBody = wsReqBodyRetry
@@ -658,6 +665,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
 				sess.clearActive(conn, readCh)
+				unlockStreamSession()
 				if isEphemeralSession {
 					closeXAIWebsocketSession(sess, "send_error")
 				}
@@ -1235,6 +1243,7 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 			sess.connMu.Lock()
 			sess.readerConn = conn
 			sess.connMu.Unlock()
+			sess.bindTranscriptConnection(conn)
 			configureXAIWebsocketConn(sess, conn)
 			go e.readUpstreamLoop(sess, conn)
 		}
@@ -1269,6 +1278,7 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
+	sess.bindTranscriptConnection(conn)
 	configureXAIWebsocketConn(sess, conn)
 	go e.readUpstreamLoop(sess, conn)
 	logXAIWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, false)
@@ -1328,6 +1338,7 @@ func readXAIWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, c
 			return 0, nil, fmt.Errorf("xai websockets executor: websocket conn is nil")
 		}
 		msgType, payload, errRead := conn.ReadMessage()
+		captureWebsocketUpstreamRead(logging.TranscriptFromContext(ctx), msgType, payload, errRead)
 		return msgType, payload, errRead
 	}
 	if conn == nil {
@@ -1360,7 +1371,9 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 		return
 	}
 	for {
+		owner := sess.transcriptBindingForConn(conn)
 		msgType, payload, errRead := conn.ReadMessage()
+		sink := sess.captureTranscriptRead(conn, owner, msgType, payload, errRead)
 		if errRead != nil {
 			sess.markTerminalError(conn, errRead)
 			invalidate := func() {
@@ -1383,6 +1396,9 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("xai websockets executor: unexpected binary message")
+				if sink != nil {
+					sink.Failure("websocket.upstream.input.2", errBinary)
+				}
 				sess.markTerminalError(conn, errBinary)
 				invalidate := func() {
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)

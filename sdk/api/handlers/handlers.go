@@ -632,7 +632,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && !cfg.Transcripts.Enabled && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()
@@ -728,6 +728,10 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 // appendAPIResponse preserves any previously captured API response and appends new data.
 func appendAPIResponse(c *gin.Context, data []byte) {
 	if c == nil || len(data) == 0 {
+		return
+	}
+	if sink := logging.TranscriptFromContext(c.Request.Context()); sink != nil {
+		sink.Capture("handler.response", data)
 		return
 	}
 
