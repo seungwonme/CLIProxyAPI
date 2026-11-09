@@ -120,20 +120,25 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var sess *codexWebsocketSession
 	isEphemeralSession := false
 	sessionLocked := false
+	var requestTranscript *websocketTranscriptBinding
 	unlockSession := func() {
 		if sess != nil && sessionLocked {
+			sess.clearRequestTranscript(requestTranscript)
 			sess.reqMu.Unlock()
 			sessionLocked = false
 		}
 	}
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
-		sess.reqMu.Lock()
-		sessionLocked = true
-		defer unlockSession()
 	} else {
 		isEphemeralSession = true
 		sess = newEphemeralCodexWebsocketSession()
+	}
+	if sess != nil {
+		sess.reqMu.Lock()
+		sessionLocked = true
+		requestTranscript = sess.bindRequestTranscript(ctx)
+		defer unlockSession()
 	}
 
 	wsReqBody := frameCodexWebsocketRequestBody(body)
@@ -207,6 +212,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var readCh chan codexWebsocketRead
 	if sess != nil {
 		readCh = sess.activate(conn)
+		sess.bindActiveTranscript(requestTranscript, conn, readCh)
 		defer func() {
 			sess.clearActive(conn, readCh)
 		}()
@@ -234,6 +240,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// Retry once with a fresh websocket connection. This is mainly to handle
 			// upstream closing the socket between sequential requests within the same
 			// execution session.
+			requestTranscript = sess.bindRequestTranscript(ctx)
 			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConnWithSIWC(ctx, auth, sess, authID, wsURL, wsHeaders, useSIWC)
 			if errDialRetry == nil && connRetry != nil {
 				previousConn, previousReadCh := conn, readCh
@@ -246,6 +253,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errBind
 				}
 				readCh = sess.activate(conn)
+				sess.bindActiveTranscript(requestTranscript, conn, readCh)
 				restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 				wsReqBodyRetry := frameCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{

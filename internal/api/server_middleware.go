@@ -315,6 +315,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		if provider == "" {
 			provider = "realtime-client-secret"
 		}
+		sdkaccess.ObserveAuthentication(c.Request.Context(), c.Request, &sdkaccess.Result{Principal: principal, Provider: provider})
 		c.Set("userApiKey", principal)
 		c.Set("accessProvider", provider)
 		reqCtx := coreusage.WithAPIKey(c.Request.Context(), principal)

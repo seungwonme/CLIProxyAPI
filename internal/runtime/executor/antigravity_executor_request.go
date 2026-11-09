@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -70,6 +71,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	isClaudeModel := strings.Contains(modelName, "claude")
 	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	payloadLogEnabled := logging.TranscriptFromContext(ctx) != nil || (e.cfg != nil && e.cfg.RequestLog && !e.cfg.Transcripts.Enabled)
 	var (
 		bodyReader io.Reader
 		payloadLog []byte
@@ -89,7 +91,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
 		payloadStrBytes = helps.FinalizePayload(ctx, payloadStrBytes)
 		bodyReader = bytes.NewReader(payloadStrBytes)
-		if e.cfg != nil && e.cfg.RequestLog {
+		if payloadLogEnabled {
 			payloadLog = append([]byte(nil), payloadStrBytes...)
 		}
 	} else {
@@ -104,7 +106,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payload = applyAntigravityNativeSignatureReplayIfNeeded(modelName, payload)
 		payload = helps.FinalizePayload(ctx, payload)
 		bodyReader = bytes.NewReader(payload)
-		if e.cfg != nil && e.cfg.RequestLog {
+		if payloadLogEnabled {
 			payloadLog = append([]byte(nil), payload...)
 		}
 	}
