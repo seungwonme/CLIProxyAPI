@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -20,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func TestTranscriptsActualBidirectionalResponsesWebsocket(t *testing.T) {
@@ -97,7 +97,7 @@ func TestTranscriptsActualBidirectionalResponsesWebsocket(t *testing.T) {
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		if gjson.GetBytes(data, "type").String() == "response.completed" {
+		if ojson.GetBytesNoCopy(data, "type").String() == "response.completed" {
 			break
 		}
 	}

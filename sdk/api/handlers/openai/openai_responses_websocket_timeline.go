@@ -251,7 +251,7 @@ func (w *responsesWebsocketWriter) payloadDiagnostic(payload []byte) string {
 	default:
 		eventType = "other"
 	}
-	status := gjson.GetBytes(payload, "status").Int()
+	status := ojson.GetBytesNoCopy(payload, "status").Int()
 	if status < 100 || status > 599 {
 		status = 0
 	}

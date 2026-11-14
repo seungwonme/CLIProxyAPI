@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,10 +239,11 @@ func TestTranscriptWebsocketInputCapturesRawInterruptBeforeDiagnostics(t *testin
 			writer := newResponsesWebsocketWriter(peer)
 			writer.sink = sink
 			forwarded := make(chan []byte, 1)
+			var inputEpoch atomic.Uint64
 			_, done := readResponsesWebsocketInput(ctx, cancel, peer, func(payload []byte) error {
 				forwarded <- bytes.Clone(payload)
 				return nil
-			}, newResponsesLocalInterrupt(), writer, timeline)
+			}, newResponsesLocalInterrupt(), writer, timeline, &inputEpoch)
 			t.Cleanup(func() {
 				_ = peer.Close()
 				select {

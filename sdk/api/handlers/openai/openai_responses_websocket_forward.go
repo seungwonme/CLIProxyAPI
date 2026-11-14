@@ -285,11 +285,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg, payloads[i])
 					if wrote {
 						log.Infof(
-							"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+							"responses websocket: downstream_out id=%s type=%d %s",
 							sessionID,
 							websocket.TextMessage,
-							websocketPayloadEventType(errorPayload),
-							websocketPayloadPreview(errorPayload),
+							writer.payloadDiagnostic(errorPayload),
 						)
 					}
 					cancel(payloadErrMsg.Error)

@@ -305,9 +305,8 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error, wsTimel
 			timelineLog.Append("response", payload, time.Now())
 		}
 		log.Infof(
-			"responses websocket: downstream_out disconnect_error event=%s payload=%s",
-			websocketPayloadEventType(payload),
-			websocketPayloadPreview(payload),
+			"responses websocket: downstream_out disconnect_error %s",
+			w.payloadDiagnostic(payload),
 		)
 	}
 	if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
@@ -479,6 +478,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	}
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 	wsTimelineLog.sink = writer.sink
+	syncTranscriptSink := func() {
+		if writer.sink != nil || c == nil || c.Request == nil {
+			return
+		}
+		if sink := logging.TranscriptFromContext(c.Request.Context()); sink != nil {
+			writer.sink = sink
+			wsTimelineLog.sink = sink
+		}
+	}
 	localInterrupt := newResponsesLocalInterrupt()
 	// Advanced on every upstream loss: input read under an older epoch predates the loss.
 	var inputEpoch atomic.Uint64
@@ -551,7 +559,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cancelSocket(nil)
 		_, _ = writer.closeWithoutError()
 		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
-			log.Warnf("responses websocket: close connection error: %v", errClose)
+			log.Warnf("responses websocket: close connection error: %s", writer.errorDiagnostic(errClose))
 		}
 		disconnectWg.Wait()
 		if errMsg := recordedDisconnectErr.Load(); errMsg != nil {
@@ -654,7 +662,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
+				log.Infof("responses websocket: client disconnected id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errReadMessage))
 			} else {
 				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
 			}
@@ -703,6 +711,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		syncTranscriptSink()
 		if msgEpoch < inputEpoch.Load() {
 			if errWrite := writeResponsesWebsocketPreviousResponseNotFound(writer, wsTimelineLog, payload); errWrite != nil {
 				wsTerminateErr = errWrite
@@ -766,7 +775,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !matched {
 					_ = conn.Close()
 				} else if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
-					log.Debugf("responses websocket: replay close failed id=%s error=%v", passthroughSessionID, errClose)
+					log.Debugf("responses websocket: replay close failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errClose))
 				}
 				return
 			}
@@ -1081,9 +1090,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			case isWebsocketConnectionClosedError(errForward):
 				// The client hung up while a downstream write was in flight. This is a
 				// normal shutdown race, not a proxy failure.
-				log.Debugf("responses websocket: client closed during forward id=%s error=%v", passthroughSessionID, errForward)
+				log.Debugf("responses websocket: client closed during forward id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errForward))
 			default:
-				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
+				log.Warnf("responses websocket: forward failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errForward))
 			}
 			return
 		}
@@ -1112,7 +1121,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !matched {
 					_ = conn.Close()
 				} else if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
-					log.Debugf("responses websocket: credential replay close failed id=%s error=%v", passthroughSessionID, errClose)
+					log.Debugf("responses websocket: credential replay close failed id=%s error=%s", passthroughSessionID, writer.errorDiagnostic(errClose))
 				}
 				return
 			}
