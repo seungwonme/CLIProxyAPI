@@ -309,6 +309,12 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
+		if existing, found := s.coreManager.Executor("claude"); found {
+			if previous, ok := existing.(*executor.ClaudeExecutor); ok {
+				s.coreManager.RegisterExecutor(previous.WithConfig(cfg))
+				return
+			}
+		}
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
@@ -360,7 +366,7 @@ func (s *Service) registerOpenAICompatProviderExecutor(providerKey string, auth 
 	nextExecutor := s.wrapOpenAICompatIfPluginAuth(compatExecutor, auth, cfg)
 	if !forceReplace {
 		if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor {
-			if shouldKeepExistingOpenAICompatExecutor(s, existingExecutor, nextExecutor, respectNonOwned) {
+			if shouldKeepExistingOpenAICompatExecutor(s, existingExecutor, nextExecutor, cfg, respectNonOwned) {
 				return
 			}
 		}
@@ -405,11 +411,14 @@ func pluginAuthProviderLookupKeys(auth *coreauth.Auth, fallback string) []string
 	return keys
 }
 
-func shouldKeepExistingOpenAICompatExecutor(s *Service, existing, next coreauth.ProviderExecutor, respectNonOwned bool) bool {
+func shouldKeepExistingOpenAICompatExecutor(s *Service, existing, next coreauth.ProviderExecutor, cfg *config.Config, respectNonOwned bool) bool {
 	if existing == nil || next == nil {
 		return false
 	}
 	if shouldUpgradeOpenAICompatToPluginRefresh(existing, next) {
+		return false
+	}
+	if cfgHolder, ok := existing.(interface{ UsesConfig(*config.Config) bool }); ok && !cfgHolder.UsesConfig(cfg) {
 		return false
 	}
 	if pluginhost.IsPluginRefreshCompatExecutor(existing) && pluginhost.IsPluginRefreshCompatExecutor(next) {
@@ -499,7 +508,7 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 	if s == nil || s.pluginHost == nil {
 		return nil
 	}
-	return s.pluginHost.ModelsForProvider(providerKey)
+	return s.pluginHost.StaticAppendModelsForProvider(providerKey)
 }
 
 // appendPluginModels appends the provider's plugin static models that are not excluded.
